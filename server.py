@@ -1,337 +1,301 @@
-from flask import Flask, request, Response
+import json
+import os
+import threading
+import time
+from datetime import datetime, timezone
+
+import paho.mqtt.client as mqtt
+from flask import Flask, jsonify, render_template_string
+
+# ── Configuration (override via environment variables on Render) ──────────
+MQTT_BROKER = os.environ.get("MQTT_BROKER", "broker.emqx.io")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
+MQTT_TOPIC = os.environ.get("MQTT_TOPIC", "AG_201/Test")
+MQTT_USERNAME = os.environ.get("MQTT_USERNAME")  # leave unset for public broker
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD")
 
 app = Flask(__name__)
 
-# The "mailbox" — always holds ONLY the latest packet.
-latest_packet = ""
+# ── Shared in-memory state (the "mailbox") ─────────────────────────────────
+state = {
+    "payload": None,          # last parsed JSON dict from the device
+    "raw": None,              # last raw MQTT message string (fallback if not JSON)
+    "received_at": None,      # UTC ISO timestamp of last message
+    "connected": False,       # current MQTT connection status
+    "message_count": 0,       # total messages received since server start
+}
+state_lock = threading.Lock()
 
 
+# ── MQTT background client ─────────────────────────────────────────────────
+def on_connect(client, userdata, flags, reason_code, properties=None):
+    if reason_code == 0:
+        print(f"[mqtt] connected to {MQTT_BROKER}:{MQTT_PORT}")
+        client.subscribe(MQTT_TOPIC)
+        print(f"[mqtt] subscribed to topic '{MQTT_TOPIC}'")
+        with state_lock:
+            state["connected"] = True
+    else:
+        print(f"[mqtt] connect failed, reason code {reason_code}")
+
+
+def on_disconnect(client, userdata, reason_code, properties=None):
+    print(f"[mqtt] disconnected, reason code {reason_code}")
+    with state_lock:
+        state["connected"] = False
+
+
+def on_message(client, userdata, msg):
+    raw = msg.payload.decode("utf-8", errors="replace")
+    parsed = None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        pass  # keep raw only, e.g. if the device sends non-JSON text
+
+    with state_lock:
+        state["raw"] = raw
+        state["payload"] = parsed
+        state["received_at"] = datetime.now(timezone.utc).isoformat()
+        state["message_count"] += 1
+
+
+def start_mqtt_thread():
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, protocol=mqtt.MQTTv311)
+    if MQTT_USERNAME:
+        client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+    client.on_message = on_message
+
+    while True:
+        try:
+            client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+            client.loop_forever()  # blocks; reconnects are handled by the retry loop below
+        except Exception as exc:
+            print(f"[mqtt] connection error: {exc}, retrying in 5s")
+            with state_lock:
+                state["connected"] = False
+            time.sleep(5)
+
+
+# Start the MQTT subscriber as soon as the module loads, in its own thread,
+# so it runs alongside Flask's web server inside the same process/service.
+mqtt_thread = threading.Thread(target=start_mqtt_thread, daemon=True)
+mqtt_thread.start()
+
+
+# ── HTTP routes ─────────────────────────────────────────────────────────────
 @app.route("/")
-def home():
-    return "Server is running. POST to /data to send data, GET /data to read the latest packet, or visit /dashboard."
+def index():
+    return jsonify({
+        "status": "ok",
+        "service": "mqtt-http-bridge",
+        "topic": MQTT_TOPIC,
+        "broker": f"{MQTT_BROKER}:{MQTT_PORT}",
+        "routes": ["/data", "/dashboard"],
+    })
 
 
-@app.route("/data", methods=["POST"])
-def receive_data():
-    global latest_packet
-    latest_packet = request.get_data(as_text=True)
-    return {"status": "ok", "received_length": len(latest_packet)}, 200
+@app.route("/data")
+def get_data():
+    with state_lock:
+        snapshot = dict(state)
+    return jsonify(snapshot)
 
 
-@app.route("/data", methods=["GET"])
-def send_data():
-    return Response(latest_packet, mimetype="text/plain")
+@app.route("/dashboard")
+def dashboard():
+    return render_template_string(DASHBOARD_HTML, topic=MQTT_TOPIC, broker=MQTT_BROKER)
 
 
-DASHBOARD_HTML = r"""<!DOCTYPE html>
+# ── Dashboard page (self-contained: HTML + CSS + JS in one string) ────────
+DASHBOARD_HTML = """
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Live Dashboard</title>
+<title>AG-201 · Live Readout</title>
 <style>
-  :root{
-    --bg:#eef1f5;
-    --border:#e1e5eb;
-    --text:#111827;
-    --muted:#6b7280;
-    --red:#e5484d;
-    --yellow:#f5a524;
-    --blue:#3b82f6;
-    --teal:#0f9488;
-    --green:#16a34a;
-    --amber:#f59e0b;
+  :root {
+    --bg: #10151a;
+    --panel: #1a2129;
+    --panel-border: #2a333d;
+    --text: #e7ecf0;
+    --muted: #7c8894;
+    --accent: #35c6b0;
+    --accent-dim: #1f4a44;
+    --alarm: #e2585f;
+    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --font-num: "IBM Plex Mono", "SF Mono", "Roboto Mono", Consolas, monospace;
   }
-  *{box-sizing:border-box;}
-  body{
-    margin:0;
-    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    background:var(--bg);
-    color:var(--text);
-    padding:32px;
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    padding: 32px 20px 60px;
   }
-  header{
-    display:flex;
-    justify-content:space-between;
-    align-items:flex-start;
-    margin-bottom:24px;
+  .wrap { max-width: 920px; margin: 0 auto; }
+
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 16px;
+    border-bottom: 1px solid var(--panel-border);
+    padding-bottom: 20px;
+    margin-bottom: 28px;
   }
-  h1{font-size:22px;margin:0 0 4px 0;}
-  .sub{color:var(--muted);font-size:13px;}
-  button.report{
-    background:var(--teal);
-    color:#fff;
-    border:none;
-    padding:10px 18px;
-    border-radius:8px;
-    font-size:14px;
-    cursor:pointer;
+  h1 {
+    font-size: 22px;
+    font-weight: 600;
+    margin: 0 0 6px;
+    letter-spacing: 0.2px;
   }
-  section{
-    background:#fff;
-    border:1px solid var(--border);
-    border-radius:12px;
-    padding:20px;
-    margin-bottom:20px;
+  .meta {
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.6;
   }
-  .section-title{
-    font-size:12px;
-    letter-spacing:.05em;
-    text-transform:uppercase;
-    color:var(--muted);
-    margin-bottom:14px;
-    font-weight:600;
+  .meta code { color: var(--text); font-family: var(--font-num); }
+
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--muted);
   }
-  .row{display:flex;gap:16px;flex-wrap:wrap;}
-  .card{
-    flex:1;
-    min-width:160px;
-    background:#fff;
-    border:1px solid var(--border);
-    border-radius:10px;
-    padding:16px;
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--alarm);
+    transition: background 0.3s ease;
   }
-  .card.accent{border-left:4px solid var(--teal);}
-  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;}
-  .label{font-size:12px;color:var(--muted);font-weight:600;margin-bottom:8px;display:flex;align-items:center;}
-  .value{font-size:26px;font-weight:700;}
-  .unit{font-size:13px;color:var(--muted);font-weight:500;margin-left:2px;}
-  .raw{font-size:12px;color:var(--muted);margin-top:4px;}
-  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:20px;}
-  @media (max-width:800px){.grid2{grid-template-columns:1fr;}}
+  .dot.live { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-dim); }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 14px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 18px 20px;
+  }
+  .card .label {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+  .card .value {
+    font-family: var(--font-num);
+    font-size: 30px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+  }
+  .card .unit {
+    font-size: 14px;
+    color: var(--muted);
+    margin-left: 4px;
+  }
+
+  .footer {
+    margin-top: 28px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .empty {
+    color: var(--muted);
+    font-size: 14px;
+    padding: 40px 0;
+    text-align: center;
+  }
 </style>
 </head>
 <body>
-<header>
-  <div>
-    <h1>Live Dashboard</h1>
-    <div class="sub">Real-time protection status &middot; Updated <span id="ago">--</span></div>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>AG-201 Live Readout</h1>
+        <div class="meta">
+          topic <code>{{ topic }}</code> &nbsp;·&nbsp; broker <code>{{ broker }}</code>
+        </div>
+      </div>
+      <div class="status">
+        <span class="dot" id="statusDot"></span>
+        <span id="statusText">connecting…</span>
+      </div>
+    </header>
+
+    <div class="grid" id="grid"></div>
+    <div class="empty" id="emptyMsg" style="display:none;">No message received yet from the device.</div>
+
+    <div class="footer" id="footer"></div>
   </div>
-  <button class="report" onclick="generateReport()">Generate Report</button>
-</header>
-
-<div class="grid2">
-  <section>
-    <div class="section-title">Voltage (R-Y-B)</div>
-    <div class="row">
-      <div class="card">
-        <div class="label"><span class="dot" style="background:var(--red)"></span><span class="dot" style="background:var(--yellow)"></span>Voltage R-Y</div>
-        <div class="value" id="v-ry">--<span class="unit">V</span></div>
-      </div>
-      <div class="card">
-        <div class="label"><span class="dot" style="background:var(--yellow)"></span><span class="dot" style="background:var(--blue)"></span>Voltage Y-B</div>
-        <div class="value" id="v-yb">--<span class="unit">V</span></div>
-      </div>
-      <div class="card">
-        <div class="label"><span class="dot" style="background:var(--blue)"></span><span class="dot" style="background:var(--red)"></span>Voltage B-R</div>
-        <div class="value" id="v-br">--<span class="unit">V</span></div>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <div class="section-title">Current (R-Y-B)</div>
-    <div class="row">
-      <div class="card">
-        <div class="label"><span class="dot" style="background:var(--red)"></span>Current R Phase</div>
-        <div class="value" id="i-r">--<span class="unit">A</span></div>
-      </div>
-      <div class="card">
-        <div class="label"><span class="dot" style="background:var(--yellow)"></span>Current Y Phase</div>
-        <div class="value" id="i-y">--<span class="unit">A</span></div>
-      </div>
-      <div class="card">
-        <div class="label"><span class="dot" style="background:var(--blue)"></span>Current B Phase</div>
-        <div class="value" id="i-b">--<span class="unit">A</span></div>
-      </div>
-    </div>
-  </section>
-</div>
-
-<div class="grid2">
-  <section>
-    <div class="section-title">Overload &amp; Dry Run Thresholds</div>
-    <div class="row">
-      <div class="card">
-        <div class="label">Set Current Pump 1</div>
-        <div class="value" id="th-p1">--<span class="unit">A</span></div>
-      </div>
-      <div class="card">
-        <div class="label">Set Current Pump 2</div>
-        <div class="value" id="th-p2">--<span class="unit">A</span></div>
-      </div>
-      <div class="card">
-        <div class="label">Set Dry-Run Current</div>
-        <div class="value" id="th-dry">--<span class="unit">%</span></div>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <div class="section-title">Ton / Toff Timers</div>
-    <div class="row">
-      <div class="card">
-        <div class="label">Set On Time</div>
-        <div class="value" id="t-on">--<span class="unit">min</span></div>
-      </div>
-      <div class="card">
-        <div class="label">Set Off Time</div>
-        <div class="value" id="t-off">--<span class="unit">min</span></div>
-      </div>
-    </div>
-  </section>
-</div>
-
-<div class="grid2">
-  <section>
-    <div class="section-title">System Control</div>
-    <div class="row">
-      <div class="card accent" style="border-left-color:var(--teal)">
-        <div class="label">Active Pump</div>
-        <div class="value" id="sys-pump" style="color:var(--teal)">--</div>
-        <div class="raw" id="sys-pump-raw"></div>
-      </div>
-      <div class="card accent" style="border-left-color:var(--green)">
-        <div class="label">Mode</div>
-        <div class="value" id="sys-mode" style="color:var(--green)">--</div>
-        <div class="raw" id="sys-mode-raw"></div>
-      </div>
-      <div class="card">
-        <div class="label">Pump State</div>
-        <div class="value" id="sys-state">--</div>
-        <div class="raw" id="sys-state-raw"></div>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <div class="section-title">Tank Levels</div>
-    <div class="row">
-      <div class="card" id="tank-bottom-card">
-        <div class="label">Bottom Tank</div>
-        <div class="value" id="tank-bottom">--</div>
-        <div class="raw" id="tank-bottom-raw"></div>
-      </div>
-      <div class="card" id="tank-top-card">
-        <div class="label">Top Tank</div>
-        <div class="value" id="tank-top">--</div>
-        <div class="raw" id="tank-top-raw"></div>
-      </div>
-    </div>
-  </section>
-</div>
 
 <script>
-let lastValues = null;
-let lastUpdateTime = null;
+  const grid = document.getElementById('grid');
+  const emptyMsg = document.getElementById('emptyMsg');
+  const footer = document.getElementById('footer');
+  const dot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
 
-function parsePacket(text) {
-  text = text.replace(/\n/g, ",").replace(",=Vy", ",Vy");
-  ["r2=", "D=", "P=", "M="].forEach(function(k) {
-    text = text.split(k).join("," + k);
-  });
-  const values = {};
-  text.split(",").forEach(function(part) {
-    part = part.trim();
-    if (part.indexOf("=") !== -1) {
-      const idx = part.indexOf("=");
-      const k = part.slice(0, idx);
-      const v = part.slice(idx + 1);
-      if (k) values[k] = v;
-    }
-  });
-  return values;
-}
-
-function tankStatus(low, high) {
-  low = Number(low); high = Number(high);
-  if (low === 1 && high === 1) return {text: "FULL", color: "var(--green)"};
-  if (low === 1 && high === 0) return {text: "OK", color: "var(--blue)"};
-  if (low === 0 && high === 0) return {text: "EMPTY", color: "var(--amber)"};
-  return {text: "CHECK SENSOR", color: "var(--red)"};
-}
-
-async function refresh() {
-  try {
-    const res = await fetch("/data", {cache: "no-store"});
-    const text = await res.text();
-    if (!text.trim()) return;
-    const v = parsePacket(text);
-    lastValues = v;
-    lastUpdateTime = Date.now();
-
-    document.getElementById("v-ry").innerHTML = (v.Vr || "--") + "<span class='unit'>V</span>";
-    document.getElementById("v-yb").innerHTML = (v.Vy || "--") + "<span class='unit'>V</span>";
-    document.getElementById("v-br").innerHTML = (v.Vb || "--") + "<span class='unit'>V</span>";
-
-    document.getElementById("i-r").innerHTML = (v.Ir || "--") + "<span class='unit'>A</span>";
-    document.getElementById("i-y").innerHTML = (v.Iy || "--") + "<span class='unit'>A</span>";
-    document.getElementById("i-b").innerHTML = (v.Ib || "--") + "<span class='unit'>A</span>";
-
-    document.getElementById("th-p1").innerHTML = (v.r1 || "--") + "<span class='unit'>A</span>";
-    document.getElementById("th-p2").innerHTML = (v.r2 || "--") + "<span class='unit'>A</span>";
-    document.getElementById("th-dry").innerHTML = (v.D || "--") + "<span class='unit'>%</span>";
-
-    document.getElementById("t-on").innerHTML = (v.ton || "--") + "<span class='unit'>min</span>";
-    document.getElementById("t-off").innerHTML = (v.tof || "--") + "<span class='unit'>min</span>";
-
-    const activePump = v.P === "1" ? "PUMP 2" : "PUMP 1";
-    document.getElementById("sys-pump").textContent = activePump;
-    document.getElementById("sys-pump-raw").textContent = "(raw=" + (v.P || "--") + ")";
-
-    const mode = v.M === "102" ? "AUTO" : "MANUAL";
-    document.getElementById("sys-mode").textContent = mode;
-    document.getElementById("sys-mode-raw").textContent = "(raw=" + (v.M || "--") + ")";
-
-    const state = v.PV === "1" ? "RUNNING" : "STOPPED";
-    document.getElementById("sys-state").textContent = state;
-    document.getElementById("sys-state-raw").textContent = "(raw=" + (v.PV || "--") + ")";
-
-    const bottom = tankStatus(v.L0, v.L1);
-    document.getElementById("tank-bottom").textContent = bottom.text;
-    document.getElementById("tank-bottom").style.color = bottom.color;
-    document.getElementById("tank-bottom-raw").textContent = "(low=" + (v.L0 || "-") + ", high=" + (v.L1 || "-") + ")";
-
-    const top = tankStatus(v.L2, v.L3);
-    document.getElementById("tank-top").textContent = top.text;
-    document.getElementById("tank-top").style.color = top.color;
-    document.getElementById("tank-top-raw").textContent = "(low=" + (v.L2 || "-") + ", high=" + (v.L3 || "-") + ")";
-  } catch (e) {
-    console.error("Failed to refresh:", e);
+  function labelize(key) {
+    return key.replace(/_/g, ' ').replace(/beetween/i, 'between').toLowerCase();
   }
-}
 
-function updateAgo() {
-  if (!lastUpdateTime) { document.getElementById("ago").textContent = "--"; return; }
-  const secs = Math.round((Date.now() - lastUpdateTime) / 1000);
-  document.getElementById("ago").textContent = secs + "s ago";
-}
+  function unitFor(key) {
+    if (/voltage/i.test(key)) return 'V';
+    if (/current/i.test(key)) return 'A';
+    return '';
+  }
 
-function generateReport() {
-  if (!lastValues) { alert("No data yet."); return; }
-  const lines = Object.entries(lastValues).map(function(pair) { return pair[0] + ": " + pair[1]; });
-  const blob = new Blob([lines.join("\n")], {type: "text/plain"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "pump_report_" + new Date().toISOString().slice(0,19).replace(/[:T]/g,"-") + ".txt";
-  a.click();
-  URL.revokeObjectURL(url);
-}
+  async function refresh() {
+    try {
+      const res = await fetch('/data', { cache: 'no-store' });
+      const data = await res.json();
 
-refresh();
-setInterval(refresh, 3000);
-setInterval(updateAgo, 1000);
+      dot.classList.toggle('live', !!data.connected);
+      statusText.textContent = data.connected ? 'connected to broker' : 'disconnected from broker';
+
+      if (!data.payload) {
+        grid.innerHTML = '';
+        emptyMsg.style.display = 'block';
+      } else {
+        emptyMsg.style.display = 'none';
+        grid.innerHTML = Object.entries(data.payload)
+          .filter(([k]) => k !== 'timestamp')
+          .map(([k, v]) => `
+            <div class="card">
+              <div class="label">${labelize(k)}</div>
+              <div class="value">${v}<span class="unit">${unitFor(k)}</span></div>
+            </div>
+          `).join('');
+      }
+
+      const received = data.received_at ? new Date(data.received_at).toLocaleTimeString() : '—';
+      footer.textContent = `Last message: ${received} · Total messages received: ${data.message_count}`;
+    } catch (err) {
+      statusText.textContent = 'bridge unreachable';
+      dot.classList.remove('live');
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 2000);
 </script>
 </body>
 </html>
 """
 
 
-@app.route("/dashboard")
-def dashboard():
-    return Response(DASHBOARD_HTML, mimetype="text/html")
-
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
