@@ -12,7 +12,7 @@ MQTT_BROKER = os.environ.get("MQTT_BROKER", "35.202.96.47")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 MQTT_TOPIC = os.environ.get("MQTT_TOPIC", "AG_201/Test")
 MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "device_001")
-MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "Karthik_001")
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "Aventek_001")
 
 app = Flask(__name__)
 
@@ -223,7 +223,7 @@ DASHBOARD_HTML = """
   <div class="wrap">
     <header>
       <div>
-        <h1>AG-201 Live Readout</h1>
+        <h1>AG-201 Live Read-out</h1>
         <div class="meta">
           topic <code>{{ topic }}</code> &nbsp;·&nbsp; broker <code>{{ broker }}</code>
         </div>
