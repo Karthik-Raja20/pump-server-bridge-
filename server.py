@@ -223,7 +223,7 @@ DASHBOARD_HTML = """
   <div class="wrap">
     <header>
       <div>
-        <h1>AG-201 Live Read-out</h1>
+        <h1>AG-201 Live Readout</h1>
         <div class="meta">
           topic <code>{{ topic }}</code> &nbsp;·&nbsp; broker <code>{{ broker }}</code>
         </div>
