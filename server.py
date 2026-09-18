@@ -11,8 +11,8 @@ from flask import Flask, jsonify, render_template_string
 MQTT_BROKER = os.environ.get("MQTT_BROKER", "35.202.96.47")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 MQTT_TOPIC = os.environ.get("MQTT_TOPIC", "AG_201/Test")
-MQTT_USERNAME = os.environ.get("device_001")  # leave unset for public broker
-MQTT_PASSWORD = os.environ.get("Aventek_001")
+MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "device_001")
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "Karthik_001")
 
 app = Flask(__name__)
 
