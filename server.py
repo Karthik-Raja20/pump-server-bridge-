@@ -8,11 +8,11 @@ import paho.mqtt.client as mqtt
 from flask import Flask, jsonify, render_template_string
 
 # ── Configuration (override via environment variables on Render) ──────────
-MQTT_BROKER = os.environ.get("MQTT_BROKER", "35.202.96.47")
+MQTT_BROKER = os.environ.get("MQTT_BROKER", "broker.emqx.io")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 MQTT_TOPIC = os.environ.get("MQTT_TOPIC", "AG_201/Test")
-MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "device_001")
-MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "Aventek_001")
+MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "")
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
 
 app = Flask(__name__)
 
