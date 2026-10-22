@@ -10,7 +10,7 @@ from flask import Flask, jsonify, render_template_string
 # ── Configuration (override via environment variables on Render) ──────────
 MQTT_BROKER = os.environ.get("MQTT_BROKER", "broker.emqx.io")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
-MQTT_TOPIC = os.environ.get("MQTT_TOPIC", "AG_201/Test")
+MQTT_TOPIC = os.environ.get("MQTT_TOPIC", "AG_201/Test3")
 MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "")
 MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
 
